@@ -1,6 +1,8 @@
 package com.oguzhanaslann.composereels
 
 import android.content.Context
+import android.util.Log
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
@@ -12,11 +14,14 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import okhttp3.OkHttpClient
 import java.io.File
+import kotlin.math.abs
+
+private const val TAG = "PlayerPool"
 
 @UnstableApi
 class PlayerPool(
     private val context: Context,
-    poolSize: Int = 3,
+    val poolSize: Int = 3,
     private val cacheSizeMb: Long = 100L
 ) {
     private val databaseProvider by lazy { StandaloneDatabaseProvider(context) }
@@ -48,23 +53,101 @@ class PlayerPool(
         DefaultMediaSourceFactory(cacheDataSourceFactory)
     }
 
-    private val players: List<Player> = List(poolSize) {
-        ExoPlayer.Builder(context)
+    private val _playersInUse = mutableMapOf<Int, ExoPlayer>()
+    val playersInUse = _playersInUse.toMap()
+    private val idlePlayers = mutableListOf<ExoPlayer>()
+
+    init {
+        repeat(poolSize) {
+            idlePlayers.add(createExoPlayer())
+        }
+    }
+
+    private fun createExoPlayer(): ExoPlayer {
+        return ExoPlayer.Builder(context)
             .setMediaSourceFactory(mediaSourceFactory)
             .build().apply {
                 repeatMode = Player.REPEAT_MODE_ONE
+                volume = 1f
+                playWhenReady = false
             }
     }
 
-    fun getPlayerForPage(page: Int): Player {
-        return players[page % players.size]
+    @Synchronized
+    fun acquirePlayer(page: Int, url: String): ExoPlayer {
+        _playersInUse[page]?.let {
+            return it
+        }
+
+        if (idlePlayers.isEmpty()) {
+            releasePlayerFurthestFrom(page)
+        }
+
+        val player = if (idlePlayers.isNotEmpty()) {
+            idlePlayers.removeAt(0)
+        } else {
+            createExoPlayer()
+        }
+
+        player.setMediaItem(MediaItem.fromUri(url))
+        player.prepare()
+
+        _playersInUse[page] = player
+        Log.d(TAG, "Pool state: ${_playersInUse.size} in use, ${idlePlayers.size} idle")
+        return player
+    }
+
+    @Synchronized
+    fun preloadPage(page: Int, url: String) {
+        if (_playersInUse.containsKey(page)) {
+            return
+        }
+
+        if (idlePlayers.isEmpty()) {
+            return
+        }
+
+        val player = idlePlayers.removeAt(0)
+        player.setMediaItem(MediaItem.fromUri(url))
+        player.prepare()
+        player.playWhenReady = false
+
+        _playersInUse[page] = player
+    }
+
+    private fun releasePlayerFurthestFrom(currentPage: Int) {
+        val furthestPage = _playersInUse.keys.maxByOrNull { abs(it - currentPage) }
+        furthestPage?.let { releasePage(it) }
+    }
+
+    @Synchronized
+    fun releasePage(page: Int) {
+        _playersInUse.remove(page)?.let { player ->
+            player.playWhenReady = false
+            player.stop()
+            player.clearMediaItems()
+            idlePlayers.add(player)
+        }
+    }
+
+    fun getPlayerForPage(page: Int): Player? {
+        return _playersInUse[page]
     }
 
     fun releaseAll() {
-        players.forEach {
-            it.stop()
+        _playersInUse.values.forEach {
+            it.playWhenReady = false
             it.release()
         }
-        cache.release()
+        _playersInUse.clear()
+
+        idlePlayers.forEach { it.release() }
+        idlePlayers.clear()
+
+        try {
+            cache.release()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 }
