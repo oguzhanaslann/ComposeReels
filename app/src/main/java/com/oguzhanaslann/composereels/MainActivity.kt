@@ -22,6 +22,9 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import com.oguzhanaslann.composereels.ui.theme.ComposeReelsTheme
@@ -101,11 +104,27 @@ fun VideoPager(
                 }
         }
 
-        DisposableEffect(page) {
+        val lifecycleOwner = LocalLifecycleOwner.current
+        DisposableEffect(page, lifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                when {
+                    pagerState.settledPage != page -> player?.playWhenReady = false
+                    event == Lifecycle.Event.ON_RESUME -> player?.playWhenReady = true
+                    event == Lifecycle.Event.ON_PAUSE -> player?.playWhenReady = false
+                    else -> Unit
+                }
+            }
+
+            lifecycleOwner.lifecycle.addObserver(observer)
+
             onDispose {
+                lifecycleOwner.lifecycle.removeObserver(observer)
                 player?.playWhenReady = false
+                playerPool.releasePage(page)
+                player = null
             }
         }
+
 
         player?.let {
             VideoPlayer(
