@@ -1,6 +1,7 @@
 package com.oguzhanaslann.composereels
 
 import android.content.Context
+import android.net.Uri
 import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
@@ -17,7 +18,6 @@ import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import okhttp3.OkHttpClient
 import java.io.File
-import java.util.concurrent.Executor
 import kotlin.math.abs
 
 private const val TAG = "PlayerPool"
@@ -28,23 +28,21 @@ class PlayerPool(
     val poolSize: Int = 3,
     private val cacheSizeMb: Long = 100L
 ) {
-    private val databaseProvider by lazy { StandaloneDatabaseProvider(context) }
+    private val databaseProvider = StandaloneDatabaseProvider(context)
 
     private val cache: SimpleCache by lazy {
-        val cacheDir = File(context.cacheDir, "media_cache")
-        if (!cacheDir.exists()) cacheDir.mkdirs()
-        SimpleCache(
-            cacheDir,
-            LeastRecentlyUsedCacheEvictor(cacheSizeMb * 1024 * 1024),
-            databaseProvider
-        )
+        File(context.cacheDir, "media_cache").apply { mkdirs() }.let { cacheDir ->
+            SimpleCache(
+                cacheDir,
+                LeastRecentlyUsedCacheEvictor(cacheSizeMb * 1024 * 1024),
+                databaseProvider
+            )
+        }
     }
 
-    private val okHttpClient = OkHttpClient.Builder()
-        .retryOnConnectionFailure(true)
-        .build()
-
-    private val upstreamFactory = OkHttpDataSource.Factory(okHttpClient)
+    private val upstreamFactory = OkHttpDataSource.Factory(
+        OkHttpClient.Builder().retryOnConnectionFailure(true).build()
+    )
 
     private val cacheDataSourceFactory: CacheDataSource.Factory by lazy {
         CacheDataSource.Factory()
@@ -53,42 +51,37 @@ class PlayerPool(
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
     }
 
-    private val mediaSourceFactory: DefaultMediaSourceFactory by lazy {
-        DefaultMediaSourceFactory(cacheDataSourceFactory)
-    }
-
     private val downloadManager: DownloadManager by lazy {
-        val downloadDir = File(context.getExternalFilesDir(null), "downloads")
-        if (!downloadDir.exists()) downloadDir.mkdirs()
-
-        DownloadManager(
-            context,
-            databaseProvider,
-            cache,
-            upstreamFactory,
-            Executor { it.run() }
-        ).apply {
-            maxParallelDownloads = 3
-            resumeDownloads()
+        File(context.getExternalFilesDir(null), "downloads").apply { mkdirs() }.let { downloadDir ->
+            DownloadManager(
+                context,
+                databaseProvider,
+                cache,
+                upstreamFactory
+            ) { it.run() }
+                .apply {
+                    maxParallelDownloads = 3
+                    resumeDownloads()
+                }
         }
     }
 
     private val downloadListeners = mutableMapOf<String, DownloadManager.Listener>()
-
     private val _playersInUse = mutableMapOf<Int, ExoPlayer>()
     val playersInUse = _playersInUse.toMap()
-    private val idlePlayers = mutableListOf<ExoPlayer>()
+    private val idlePlayers = ArrayDeque<ExoPlayer>()
 
     init {
         repeat(poolSize) {
-            idlePlayers.add(createExoPlayer())
+            idlePlayers.add(createPlayer())
         }
     }
 
-    private fun createExoPlayer(): ExoPlayer {
+    private fun createPlayer(): ExoPlayer {
         return ExoPlayer.Builder(context)
-            .setMediaSourceFactory(mediaSourceFactory)
-            .build().apply {
+            .setMediaSourceFactory(DefaultMediaSourceFactory(cacheDataSourceFactory))
+            .build()
+            .apply {
                 repeatMode = Player.REPEAT_MODE_ONE
                 volume = 1f
                 playWhenReady = false
@@ -97,44 +90,31 @@ class PlayerPool(
 
     @Synchronized
     fun acquirePlayer(page: Int, url: String): ExoPlayer {
-        _playersInUse[page]?.let {
-            return it
+        return _playersInUse.getOrPut(page) {
+            val player = idlePlayers.removeFirstOrNull() ?: run {
+                releasePlayerFurthestFrom(page)
+                idlePlayers.removeFirstOrNull() ?: createPlayer()
+            }
+
+            player.apply {
+                setMediaItem(MediaItem.fromUri(url))
+                prepare()
+            }.also {
+                Log.d(TAG, "Pool state: ${_playersInUse.size} in use, ${idlePlayers.size} idle")
+            }
         }
-
-        if (idlePlayers.isEmpty()) {
-            releasePlayerFurthestFrom(page)
-        }
-
-        val player = if (idlePlayers.isNotEmpty()) {
-            idlePlayers.removeAt(0)
-        } else {
-            createExoPlayer()
-        }
-
-        player.setMediaItem(MediaItem.fromUri(url))
-        player.prepare()
-
-        _playersInUse[page] = player
-        Log.d(TAG, "Pool state: ${_playersInUse.size} in use, ${idlePlayers.size} idle")
-        return player
     }
 
     @Synchronized
     fun preloadPage(page: Int, url: String) {
-        if (_playersInUse.containsKey(page)) {
-            return
+        if (_playersInUse.containsKey(page) || idlePlayers.isEmpty()) return
+
+        idlePlayers.removeFirst().apply {
+            setMediaItem(MediaItem.fromUri(url))
+            prepare()
+            playWhenReady = false
+            _playersInUse[page] = this
         }
-
-        if (idlePlayers.isEmpty()) {
-            return
-        }
-
-        val player = idlePlayers.removeAt(0)
-        player.setMediaItem(MediaItem.fromUri(url))
-        player.prepare()
-        player.playWhenReady = false
-
-        _playersInUse[page] = player
     }
 
     /**
@@ -150,41 +130,29 @@ class PlayerPool(
         onComplete: (() -> Unit)? = null,
         onError: ((Exception) -> Unit)? = null
     ) {
-        Log.d(TAG, "Starting download for: $url")
-
-        // Check if already downloaded
         if (isFullyDownloaded(url)) {
             Log.d(TAG, "Already downloaded: $url")
             onComplete?.invoke()
             return
         }
 
-        // Check if already downloading
         val existingDownload = downloadManager.downloadIndex.getDownload(url)
-        if (existingDownload != null) {
-            when (existingDownload.state) {
-                Download.STATE_DOWNLOADING, Download.STATE_QUEUED -> {
-                    Log.d(TAG, "Download already in progress: $url (${existingDownload.percentDownloaded}%)")
-                    // Just add listener to existing download
-                    addDownloadListener(url, onProgress, onComplete, onError)
-                    return
-                }
-                Download.STATE_STOPPED, Download.STATE_FAILED -> {
-                    Log.d(TAG, "Resuming download: $url (was at ${existingDownload.percentDownloaded}%)")
-                    // Will resume from where it stopped
-                }
-            }
+        if (existingDownload?.isActiveOrQueued == true) {
+            Log.d(TAG, "Download in progress: $url (${existingDownload.percentDownloaded}%)")
+            addDownloadListener(url, onProgress, onComplete, onError)
+            return
         }
 
-        val downloadRequest = DownloadRequest.Builder(url, url.toUri())
-            .build()
+        if (existingDownload?.isStoppedOrFailed == true) {
+            Log.d(TAG, "Resuming download: $url (${existingDownload.percentDownloaded}%)")
+        }
 
         addDownloadListener(url, onProgress, onComplete, onError)
+        downloadManager.addDownload(
+            DownloadRequest.Builder(url, Uri.parse(url)).build()
+        )
 
-        Log.d(TAG, "Adding download request to DownloadManager")
-        downloadManager.addDownload(downloadRequest)
-
-        Log.d(TAG, "Current downloads count: ${downloadManager.currentDownloads.size}")
+        Log.d(TAG, "Download started. Active: ${downloadManager.currentDownloads.size}")
     }
 
     private fun addDownloadListener(
@@ -193,64 +161,44 @@ class PlayerPool(
         onComplete: (() -> Unit)?,
         onError: ((Exception) -> Unit)?
     ) {
-        val listener = object : DownloadManager.Listener {
+        downloadListeners[url] = object : DownloadManager.Listener {
             override fun onDownloadChanged(
                 downloadManager: DownloadManager,
                 download: Download,
                 finalException: Exception?
             ) {
-                Log.d(TAG, "onDownloadChanged - URL: ${download.request.id}, State: ${getStateName(download.state)}")
+                if (download.request.id != url) return
 
-                if (download.request.id == url) {
-                    when (download.state) {
-                        Download.STATE_DOWNLOADING -> {
-                            val progress = download.percentDownloaded / 100f
-                            onProgress?.invoke(progress)
-                            Log.d(TAG, "Downloading: ${download.percentDownloaded}%")
-                        }
-                        Download.STATE_COMPLETED -> {
-                            Log.d(TAG, "Download completed: $url")
-                            Log.d(TAG, "Downloaded bytes: ${download.bytesDownloaded}")
-                            onComplete?.invoke()
-                            removeDownloadListener(url)
-                        }
-                        Download.STATE_FAILED -> {
-                            Log.e(TAG, "Download failed: $url", finalException)
-                            onError?.invoke(finalException ?: Exception("Download failed"))
-                            removeDownloadListener(url)
-                        }
-                        Download.STATE_STOPPED -> {
-                            Log.d(TAG, "Download stopped: $url at ${download.percentDownloaded}%")
-                        }
-                        Download.STATE_QUEUED -> {
-                            Log.d(TAG, "Download queued: $url")
-                        }
+                Log.d(
+                    TAG,
+                    "Download $url: ${download.state.stateName} (${download.percentDownloaded}%)"
+                )
+
+                when (download.state) {
+                    Download.STATE_DOWNLOADING -> {
+                        onProgress?.invoke(download.percentDownloaded / 100f)
                     }
+
+                    Download.STATE_COMPLETED -> {
+                        Log.d(TAG, "Completed: $url (${download.bytesDownloaded} bytes)")
+                        onComplete?.invoke()
+                        removeDownloadListener(url)
+                    }
+
+                    Download.STATE_FAILED -> {
+                        Log.e(TAG, "Failed: $url", finalException)
+                        onError?.invoke(finalException ?: Exception("Download failed"))
+                        removeDownloadListener(url)
+                    }
+
+                    else -> Unit
                 }
             }
-        }
-
-        downloadListeners[url] = listener
-        downloadManager.addListener(listener)
-    }
-
-    private fun getStateName(state: Int): String {
-        return when (state) {
-            Download.STATE_QUEUED -> "STATE_QUEUED"
-            Download.STATE_STOPPED -> "STATE_STOPPED"
-            Download.STATE_DOWNLOADING -> "STATE_DOWNLOADING"
-            Download.STATE_COMPLETED -> "STATE_COMPLETED"
-            Download.STATE_FAILED -> "STATE_FAILED"
-            Download.STATE_REMOVING -> "STATE_REMOVING"
-            Download.STATE_RESTARTING -> "STATE_RESTARTING"
-            else -> "STATE_UNKNOWN($state)"
-        }
+        }.also { downloadManager.addListener(it) }
     }
 
     private fun removeDownloadListener(url: String) {
-        downloadListeners.remove(url)?.let { listener ->
-            downloadManager.removeListener(listener)
-        }
+        downloadListeners.remove(url)?.let(downloadManager::removeListener)
     }
 
     /**
@@ -259,10 +207,7 @@ class PlayerPool(
      * @return true if fully downloaded, false otherwise
      */
     fun isFullyDownloaded(url: String): Boolean {
-        val download = downloadManager.downloadIndex.getDownload(url)
-        val isCompleted = download?.state == Download.STATE_COMPLETED
-        Log.d(TAG, "isFullyDownloaded - URL: $url, Download: ${download?.state}, Result: $isCompleted")
-        return isCompleted
+        return downloadManager.downloadIndex.getDownload(url)?.state == Download.STATE_COMPLETED
     }
 
     /**
@@ -271,18 +216,9 @@ class PlayerPool(
      * @return Download object containing state, progress, and size info, or null if not found
      */
     fun getDownloadInfo(url: String): DownloadInfo? {
-        val download = downloadManager.downloadIndex.getDownload(url)
-        return download?.let {
+        return downloadManager.downloadIndex.getDownload(url)?.let {
             DownloadInfo(
-                state = when (it.state) {
-                    Download.STATE_QUEUED -> DownloadState.QUEUED
-                    Download.STATE_DOWNLOADING -> DownloadState.DOWNLOADING
-                    Download.STATE_COMPLETED -> DownloadState.COMPLETED
-                    Download.STATE_FAILED -> DownloadState.FAILED
-                    Download.STATE_REMOVING -> DownloadState.REMOVING
-                    Download.STATE_STOPPED -> DownloadState.STOPPED
-                    else -> DownloadState.UNKNOWN
-                },
+                state = it.state.toDownloadState(),
                 percentDownloaded = it.percentDownloaded,
                 bytesDownloaded = it.bytesDownloaded
             )
@@ -307,47 +243,62 @@ class PlayerPool(
     }
 
     private fun releasePlayerFurthestFrom(currentPage: Int) {
-        val furthestPage = _playersInUse.keys.maxByOrNull { abs(it - currentPage) }
-        furthestPage?.let { releasePage(it) }
+        _playersInUse.keys.maxByOrNull { abs(it - currentPage) }?.let(::releasePage)
     }
 
     @Synchronized
     fun releasePage(page: Int) {
         _playersInUse.remove(page)?.let { player ->
-            player.playWhenReady = false
-            player.stop()
-            player.clearMediaItems()
+            player.apply {
+                playWhenReady = false
+                stop()
+                clearMediaItems()
+            }
             idlePlayers.add(player)
         }
     }
 
-    fun getPlayerForPage(page: Int): Player? {
-        return _playersInUse[page]
-    }
+    fun getPlayerForPage(page: Int): Player? = _playersInUse[page]
 
     fun releaseAll() {
-        downloadListeners.forEach { (_, listener) ->
-            downloadManager.removeListener(listener)
-        }
+        downloadListeners.values.forEach(downloadManager::removeListener)
         downloadListeners.clear()
 
-        _playersInUse.values.forEach {
-            it.playWhenReady = false
-            it.release()
-        }
+        (_playersInUse.values + idlePlayers).forEach { it.release() }
         _playersInUse.clear()
-
-        idlePlayers.forEach { it.release() }
         idlePlayers.clear()
 
-        try {
-            cache.release()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        runCatching { cache.release() }.onFailure { it.printStackTrace() }
+    }
+}
+
+// Extension properties for cleaner state checks
+private val Download.isActiveOrQueued: Boolean
+    get() = state == Download.STATE_DOWNLOADING || state == Download.STATE_QUEUED
+
+private val Download.isStoppedOrFailed: Boolean
+    get() = state == Download.STATE_STOPPED || state == Download.STATE_FAILED
+
+private val Int.stateName: String
+    get() = when (this) {
+        Download.STATE_QUEUED -> "QUEUED"
+        Download.STATE_STOPPED -> "STOPPED"
+        Download.STATE_DOWNLOADING -> "DOWNLOADING"
+        Download.STATE_COMPLETED -> "COMPLETED"
+        Download.STATE_FAILED -> "FAILED"
+        Download.STATE_REMOVING -> "REMOVING"
+        Download.STATE_RESTARTING -> "RESTARTING"
+        else -> "UNKNOWN($this)"
     }
 
-    private fun String.toUri() = android.net.Uri.parse(this)
+private fun Int.toDownloadState(): DownloadState = when (this) {
+    Download.STATE_QUEUED -> DownloadState.QUEUED
+    Download.STATE_DOWNLOADING -> DownloadState.DOWNLOADING
+    Download.STATE_COMPLETED -> DownloadState.COMPLETED
+    Download.STATE_FAILED -> DownloadState.FAILED
+    Download.STATE_REMOVING -> DownloadState.REMOVING
+    Download.STATE_STOPPED -> DownloadState.STOPPED
+    else -> DownloadState.UNKNOWN
 }
 
 data class DownloadInfo(
