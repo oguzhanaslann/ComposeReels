@@ -44,38 +44,36 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     val context = LocalContext.current
                     val playerPool = remember { PlayerPool(context, poolSize = 4) }
-                    val url =
-                        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"
-                    playerPool.downloadToCache(
-                        url = url,
-                        onProgress = { progress ->
-                            Log.d("Download", "Progress: ${(progress * 100).toInt()}%")
-                        },
-                        onComplete = {
-                            Log.d("Download", "Complete!")
-                            val isDownloaded = playerPool.isFullyDownloaded(url)
-                            Log.d("Download", "Is downloaded: $isDownloaded")
-                            if (isDownloaded) {
-                                play = isDownloaded
-                            }
-                        },
-                        onError = { exception ->
-                            Log.e("Download", "Failed: ${exception.message}")
-                        }
-                    )
+//                    val url =
+//                        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"
+//                    playerPool.downloadToCache(
+//                        url = url,
+//                        onProgress = { progress ->
+//                            Log.d("Download", "Progress: ${(progress * 100).toInt()}%")
+//                        },
+//                        onComplete = {
+//                            Log.d("Download", "Complete!")
+//                            val isDownloaded = playerPool.isFullyDownloaded(url)
+//                            Log.d("Download", "Is downloaded: $isDownloaded")
+//                            if (isDownloaded) {
+//                                play = isDownloaded
+//                            }
+//                        },
+//                        onError = { exception ->
+//                            Log.e("Download", "Failed: ${exception.message}")
+//                        }
+//                    )
 
-                    if (play) {
-                        DisposableEffect(Unit) {
-                            onDispose {
-                                playerPool.releaseAll()
-                            }
+                    DisposableEffect(Unit) {
+                        onDispose {
+                            playerPool.releaseAll()
                         }
-
-                        VideoPager(
-                            playerPool = playerPool,
-                            modifier = Modifier.padding(innerPadding)
-                        )
                     }
+
+                    VideoPager(
+                        playerPool = playerPool,
+                        modifier = Modifier.padding(innerPadding)
+                    )
                 }
             }
         }
@@ -91,6 +89,10 @@ fun VideoPager(
     val videoUrls = remember {
         listOf(
             "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+            "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+            "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
+            "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
+            "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4",
         )
     }
     val pagerState = rememberPagerState { videoUrls.size }

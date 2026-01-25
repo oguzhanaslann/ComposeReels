@@ -5,6 +5,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.snapshotFlow
+import androidx.core.util.keyIterator
 import androidx.media3.common.util.UnstableApi
 import kotlinx.coroutines.flow.distinctUntilChanged
 
@@ -92,14 +93,12 @@ private fun preloadNextPages(
 
 private fun releaseDistantPages(currentPage: Int, playerPool: PlayerPool) {
     val pagesToKeep = setOf(currentPage - 1, currentPage, currentPage + 1)
-
-    val pagesToRelease = playerPool.playersInUse.keys.filter { page ->
-        page !in pagesToKeep
-    }
-
-    pagesToRelease.forEach {
-        playerPool.releasePage(it)
-    }
+    playerPool.playersInUse.keyIterator()
+        .forEachRemaining { page ->
+            if (page !in pagesToKeep) {
+                playerPool.releasePage(page)
+            }
+        }
 }
 
 private fun isIndexValid(index: Int, videoUrls: List<String>): Boolean {

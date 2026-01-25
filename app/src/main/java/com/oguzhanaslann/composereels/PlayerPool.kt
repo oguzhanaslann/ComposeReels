@@ -3,6 +3,9 @@ package com.oguzhanaslann.composereels
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import android.util.SparseArray
+import androidx.core.util.forEach
+import androidx.core.util.keyIterator
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -18,6 +21,7 @@ import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import okhttp3.OkHttpClient
 import java.io.File
+import java.util.concurrent.Executor
 import kotlin.math.abs
 
 private const val TAG = "PlayerPool"
@@ -57,18 +61,18 @@ class PlayerPool(
                 context,
                 databaseProvider,
                 cache,
-                upstreamFactory
-            ) { it.run() }
-                .apply {
-                    maxParallelDownloads = 3
-                    resumeDownloads()
-                }
+                upstreamFactory,
+                Executor { it.run() }
+            ).apply {
+                maxParallelDownloads = 3
+                resumeDownloads()
+            }
         }
     }
 
     private val downloadListeners = mutableMapOf<String, DownloadManager.Listener>()
-    private val _playersInUse = mutableMapOf<Int, ExoPlayer>()
-    val playersInUse = _playersInUse.toMap()
+    private val _playersInUse = SparseArray<ExoPlayer>()
+    val playersInUse get()= _playersInUse
     private val idlePlayers = ArrayDeque<ExoPlayer>()
 
     init {
@@ -90,24 +94,26 @@ class PlayerPool(
 
     @Synchronized
     fun acquirePlayer(page: Int, url: String): ExoPlayer {
-        return _playersInUse.getOrPut(page) {
-            val player = idlePlayers.removeFirstOrNull() ?: run {
-                releasePlayerFurthestFrom(page)
-                idlePlayers.removeFirstOrNull() ?: createPlayer()
-            }
+        _playersInUse[page]?.let { return it }
 
-            player.apply {
-                setMediaItem(MediaItem.fromUri(url))
-                prepare()
-            }.also {
-                Log.d(TAG, "Pool state: ${_playersInUse.size} in use, ${idlePlayers.size} idle")
-            }
+        val player = idlePlayers.removeFirstOrNull() ?: run {
+            releasePlayerFurthestFrom(page)
+            idlePlayers.removeFirstOrNull() ?: createPlayer()
         }
+
+        player.apply {
+            setMediaItem(MediaItem.fromUri(url))
+            prepare()
+        }
+
+        _playersInUse[page] = player
+        Log.d(TAG, "Pool state: ${_playersInUse.size()} in use, ${idlePlayers.size} idle")
+        return player
     }
 
     @Synchronized
     fun preloadPage(page: Int, url: String) {
-        if (_playersInUse.containsKey(page) || idlePlayers.isEmpty()) return
+        if (_playersInUse[page] != null || idlePlayers.isEmpty()) return
 
         idlePlayers.removeFirst().apply {
             setMediaItem(MediaItem.fromUri(url))
@@ -169,28 +175,22 @@ class PlayerPool(
             ) {
                 if (download.request.id != url) return
 
-                Log.d(
-                    TAG,
-                    "Download $url: ${download.state.stateName} (${download.percentDownloaded}%)"
-                )
+                Log.d(TAG, "Download $url: ${download.state.stateName} (${download.percentDownloaded}%)")
 
                 when (download.state) {
                     Download.STATE_DOWNLOADING -> {
                         onProgress?.invoke(download.percentDownloaded / 100f)
                     }
-
                     Download.STATE_COMPLETED -> {
                         Log.d(TAG, "Completed: $url (${download.bytesDownloaded} bytes)")
                         onComplete?.invoke()
                         removeDownloadListener(url)
                     }
-
                     Download.STATE_FAILED -> {
                         Log.e(TAG, "Failed: $url", finalException)
                         onError?.invoke(finalException ?: Exception("Download failed"))
                         removeDownloadListener(url)
                     }
-
                     else -> Unit
                 }
             }
@@ -243,18 +243,32 @@ class PlayerPool(
     }
 
     private fun releasePlayerFurthestFrom(currentPage: Int) {
-        _playersInUse.keys.maxByOrNull { abs(it - currentPage) }?.let(::releasePage)
+        var furthestPage = -1
+        var maxDistance = -1
+
+        _playersInUse.keyIterator().forEach { page ->
+            val distance = abs(page - currentPage)
+            if (distance > maxDistance) {
+                maxDistance = distance
+                furthestPage = page
+            }
+        }
+
+        if (furthestPage != -1) {
+            releasePage(furthestPage)
+        }
     }
 
     @Synchronized
     fun releasePage(page: Int) {
-        _playersInUse.remove(page)?.let { player ->
+        _playersInUse[page]?.let { player ->
             player.apply {
                 playWhenReady = false
                 stop()
                 clearMediaItems()
             }
             idlePlayers.add(player)
+            _playersInUse.remove(page)
         }
     }
 
@@ -264,7 +278,11 @@ class PlayerPool(
         downloadListeners.values.forEach(downloadManager::removeListener)
         downloadListeners.clear()
 
-        (_playersInUse.values + idlePlayers).forEach { it.release() }
+        val allPlayers = mutableListOf<ExoPlayer>()
+        _playersInUse.forEach { _, player -> allPlayers.add(player) }
+        allPlayers.addAll(idlePlayers)
+        allPlayers.forEach { it.release() }
+
         _playersInUse.clear()
         idlePlayers.clear()
 
