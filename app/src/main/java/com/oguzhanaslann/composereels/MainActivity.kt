@@ -1,6 +1,7 @@
 package com.oguzhanaslann.composereels
 
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -39,20 +40,43 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             ComposeReelsTheme {
+
+                var play by remember { mutableStateOf(false) }
+
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     val context = LocalContext.current
                     val playerPool = remember { PlayerPool(context, poolSize = 4) }
-
-                    DisposableEffect(Unit) {
-                        onDispose {
-                            playerPool.releaseAll()
+                    val url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"
+                    playerPool.downloadToCache(
+                        url = url,
+                        onProgress = { progress ->
+                            Log.d("Download", "Progress: ${(progress * 100).toInt()}%")
+                        },
+                        onComplete = {
+                            Log.d("Download", "Complete!")
+                            val isDownloaded = playerPool.isFullyDownloaded(url)
+                            Log.d("Download", "Is downloaded: $isDownloaded")
+                            if (isDownloaded) {
+                                play = isDownloaded
+                            }
+                        },
+                        onError = { exception ->
+                            Log.e("Download", "Failed: ${exception.message}")
                         }
-                    }
-
-                    VideoPager(
-                        playerPool = playerPool,
-                        modifier = Modifier.padding(innerPadding)
                     )
+
+                    if (play) {
+                        DisposableEffect(Unit) {
+                            onDispose {
+                                playerPool.releaseAll()
+                            }
+                        }
+
+                        VideoPager(
+                            playerPool = playerPool,
+                            modifier = Modifier.padding(innerPadding)
+                        )
+                    }
                 }
             }
         }
@@ -67,12 +91,7 @@ fun VideoPager(
 ) {
     val videoUrls = remember {
         listOf(
-            "https://storage.googleapis.com/exoplayer-test-media-0/BigBuckBunny_320x180.mp4",
             "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
-            "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
-            "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
-            "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
-            "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4",
         )
     }
     val pagerState = rememberPagerState { videoUrls.size }
