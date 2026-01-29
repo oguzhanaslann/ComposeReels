@@ -1,31 +1,45 @@
 package com.oguzhanaslann.composereels
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.offline.DownloadRequest
+import androidx.media3.exoplayer.offline.DownloadService
 import com.oguzhanaslann.composereels.ui.theme.ComposeReelsTheme
 import kotlinx.coroutines.flow.distinctUntilChanged
 
@@ -35,45 +49,62 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
+        // Removed direct call, now handled after permission in setContent
+        // downloadVideoInBackground(this , "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4")
         setContent {
             ComposeReelsTheme {
 
                 var play by remember { mutableStateOf(false) }
+                var isDownloading by remember { mutableStateOf(false) }
 
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     val context = LocalContext.current
                     val playerPool = remember { PlayerPool(context, poolSize = 4) }
-//                    val url =
-//                        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"
-//                    playerPool.downloadToCache(
-//                        url = url,
-//                        onProgress = { progress ->
-//                            Log.d("Download", "Progress: ${(progress * 100).toInt()}%")
-//                        },
-//                        onComplete = {
-//                            Log.d("Download", "Complete!")
-//                            val isDownloaded = playerPool.isFullyDownloaded(url)
-//                            Log.d("Download", "Is downloaded: $isDownloaded")
-//                            if (isDownloaded) {
-//                                play = isDownloaded
-//                            }
-//                        },
-//                        onError = { exception ->
-//                            Log.e("Download", "Failed: ${exception.message}")
-//                        }
-//                    )
+                    val url =
+                        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"
+                    playerPool.downloadToCache(
+                        url = url,
+                        onProgress = { progress ->
+                            isDownloading = progress < 1f
+                            Log.d("Download", "Progress: ${(progress * 100).toInt()}%")
+                        },
+                        onComplete = {
+                            Log.d("Download", "Complete!")
+                            val isDownloaded = playerPool.isFullyDownloaded(url)
+                            Log.d("Download", "Is downloaded: $isDownloaded")
+                            if (isDownloaded) {
+                                play = isDownloaded
+                            }
+                            isDownloading = false
+                        },
+                        onError = { exception ->
+                            Log.e("Download", "Failed: ${exception.message}")
+                            isDownloading = false
+                        }
+                    )
 
-                    DisposableEffect(Unit) {
-                        onDispose {
-                            playerPool.releaseAll()
+                    if (isDownloading) {
+                        Box(
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            LinearProgressIndicator(
+                                modifier = Modifier.align(Alignment.Center)
+                            )
                         }
                     }
 
-                    VideoPager(
-                        playerPool = playerPool,
-                        modifier = Modifier.padding(innerPadding)
-                    )
+                    if (play) {
+                        DisposableEffect(Unit) {
+                            onDispose {
+                                playerPool.releaseAll()
+                            }
+                        }
+
+                        VideoPager(
+                            playerPool = playerPool,
+                            modifier = Modifier.padding(innerPadding)
+                        )
+                    }
                 }
             }
         }
