@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">ComposeReels</string>
+    <string name="download_notification_channel_name">ComposeReels</string>
 </resources>

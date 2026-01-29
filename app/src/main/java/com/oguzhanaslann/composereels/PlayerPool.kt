@@ -55,7 +55,7 @@ class PlayerPool(
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
     }
 
-    private val downloadManager: DownloadManager by lazy {
+    val downloadManager: DownloadManager by lazy {
         File(context.getExternalFilesDir(null), "downloads").apply { mkdirs() }.let { downloadDir ->
             DownloadManager(
                 context,
