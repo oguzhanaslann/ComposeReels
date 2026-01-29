@@ -13,23 +13,17 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
@@ -53,61 +47,54 @@ class MainActivity : ComponentActivity() {
         // downloadVideoInBackground(this , "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4")
         setContent {
             ComposeReelsTheme {
+                val context = LocalContext.current
+                val videoUrlToDownload =
+                    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"
 
-                var play by remember { mutableStateOf(false) }
-                var isDownloading by remember { mutableStateOf(false) }
-
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    val context = LocalContext.current
-                    val playerPool = remember { PlayerPool(context, poolSize = 4) }
-                    val url =
-                        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"
-                    playerPool.downloadToCache(
-                        url = url,
-                        onProgress = { progress ->
-                            isDownloading = progress < 1f
-                            Log.d("Download", "Progress: ${(progress * 100).toInt()}%")
-                        },
-                        onComplete = {
-                            Log.d("Download", "Complete!")
-                            val isDownloaded = playerPool.isFullyDownloaded(url)
-                            Log.d("Download", "Is downloaded: $isDownloaded")
-                            if (isDownloaded) {
-                                play = isDownloaded
-                            }
-                            isDownloading = false
-                        },
-                        onError = { exception ->
-                            Log.e("Download", "Failed: ${exception.message}")
-                            isDownloading = false
-                        }
-                    )
-
-                    if (isDownloading) {
-                        Box(
-                            modifier = Modifier.fillMaxSize()
-                        ) {
-                            LinearProgressIndicator(
-                                modifier = Modifier.align(Alignment.Center)
-                            )
-                        }
+                val requestPermissionLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.RequestPermission()
+                ) { isGranted: Boolean ->
+                    if (isGranted) {
+                        Log.d("Permission", "Notification permission granted")
+                        downloadVideoInBackground(context, videoUrlToDownload)
+                    } else {
+                        Log.d("Permission", "Notification permission denied")
+                        // Handle the case where permission is denied, maybe show a message
                     }
+                }
 
-                    if (play) {
-                        DisposableEffect(Unit) {
-                            onDispose {
-                                playerPool.releaseAll()
-                            }
+                LaunchedEffect(Unit) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        if (ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.POST_NOTIFICATIONS
+                            ) != PackageManager.PERMISSION_GRANTED
+                        ) {
+                            requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            downloadVideoInBackground(context, videoUrlToDownload)
                         }
-
-                        VideoPager(
-                            playerPool = playerPool,
-                            modifier = Modifier.padding(innerPadding)
-                        )
+                    } else {
+                        downloadVideoInBackground(context, videoUrlToDownload)
                     }
                 }
             }
         }
+    }
+
+
+    // Trigger a download through the service
+    @OptIn(UnstableApi::class)
+    fun downloadVideoInBackground(context: Context, url: String) {
+        val downloadRequest = DownloadRequest.Builder(url, Uri.parse(url))
+            .build()
+
+        DownloadService.sendAddDownload(
+            context,
+            VideoDownloadService::class.java,
+            downloadRequest,
+            true // Set to true to start service in foreground immediately
+        )
     }
 }
 
